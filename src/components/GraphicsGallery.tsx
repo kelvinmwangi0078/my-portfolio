@@ -44,8 +44,6 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
 
   // Upload Form State
   const [uploadTitle, setUploadTitle] = useState('');
-  const [uploadClient, setUploadClient] = useState('');
-  const [uploadDescription, setUploadDescription] = useState('');
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null);
   const [uploadedFileName, setUploadedFileName] = useState('');
   const [uploadedFileSize, setUploadedFileSize] = useState('');
@@ -84,7 +82,7 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
       image: previewDataUrl,
       fileType: uploadedFileType || 'IMG',
       fileSize: uploadedFileSize || '1 MB',
-      description: uploadDescription || 'Graphic design creative asset.',
+     
       isUserUploaded: true,
       dateAdded: new Date().toISOString().split('T')[0]
     };
@@ -114,8 +112,7 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
       setUploadSuccess(false);
       setIsUploadModalOpen(false);
       setUploadTitle('');
-      setUploadClient('');
-      setUploadDescription('');
+   
       setPreviewDataUrl(null);
       setUploadedFileName('');
     }, 700);
@@ -392,8 +389,6 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
                     <label className="block text-xs font-semibold text-neutral-400">Client / Brand (Optional)</label>
                     <input
                       type="text"
-                      value={uploadClient}
-                      onChange={(e) => setUploadClient(e.target.value)}
                       placeholder="e.g. Kipawa Organics / Freelance"
                       className={`w-full py-2 px-3 rounded-lg border text-xs focus:outline-none focus:border-[#E2B714] ${
                         theme === 'dark' ? 'bg-[#12141F] border-[#252839] text-white' : 'bg-neutral-50 border-neutral-300'
@@ -406,8 +401,6 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
                     <label className="block text-xs font-semibold text-neutral-400">Description (Optional)</label>
                     <textarea
                       rows={2}
-                      value={uploadDescription}
-                      onChange={(e) => setUploadDescription(e.target.value)}
                       placeholder="Brief notes about the design, tools used, or client context..."
                       className={`w-full py-2 px-3 rounded-lg border text-xs focus:outline-none focus:border-[#E2B714] ${
                         theme === 'dark' ? 'bg-[#12141F] border-[#252839] text-white' : 'bg-neutral-50 border-neutral-300'
