@@ -17,15 +17,19 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Neon PostgreSQL Connection Pool
-const rawConnectionString =
-  process.env.DATABASE_URL ||
-  'postgresql://neondb_owner:npg_C6KAaTFE1ziB@ep-patient-bird-b5vwdre9-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require';
+// --- Neon PostgreSQL connection (DATABASE_URL must come from the environment) ---
+const rawConnectionString = process.env.DATABASE_URL;
 
-// Strip channel_binding if present to ensure maximum Node.js pg SCRAM compatibility
-const neonConnectionString = rawConnectionString.replace(/[?&]channel_binding=[^&]+/, (match) =>
-  match.startsWith('?') ? '?' : ''
-).replace(/\?$/, '');
+if (!rawConnectionString) {
+  throw new Error(
+    'DATABASE_URL is not set. Add it to your .env file locally, or to your hosting dashboard.'
+  );
+}
+
+// Strip channel_binding if present for maximum Node.js pg SCRAM compatibility
+const neonConnectionString = rawConnectionString
+  .replace(/[?&]channel_binding=[^&]+/, (match) => (match.startsWith('?') ? '?' : ''))
+  .replace(/\?$/, '');
 
 const pool = new Pool({
   connectionString: neonConnectionString,
@@ -36,7 +40,7 @@ const pool = new Pool({
   idleTimeoutMillis: 30000
 });
 
-// Initialize Tables in Neon Database
+// Initialize tables
 async function initDb() {
   try {
     const client = await pool.connect();
@@ -96,14 +100,14 @@ initDb();
 
 // --- API ROUTES ---
 
-// 1. Profile Avatar
+// 1. Profile avatar
 app.get('/api/profile', async (_req: Request, res: Response) => {
   try {
-    const { rows } = await pool.query('SELECT avatar_url FROM portfolio_profile WHERE id = $1', ['kelvin_avatar']);
-    if (rows.length > 0) {
-      return res.json({ avatarUrl: rows[0].avatar_url });
-    }
-    return res.json({ avatarUrl: null });
+    const { rows } = await pool.query(
+      'SELECT avatar_url FROM portfolio_profile WHERE id = $1',
+      ['kelvin_avatar']
+    );
+    return res.json({ avatarUrl: rows.length > 0 ? rows[0].avatar_url : null });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -116,7 +120,7 @@ app.post('/api/profile', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'avatarUrl is required' });
     }
     await pool.query(
-      `INSERT INTO portfolio_profile (id, avatar_url, updated_at) 
+      `INSERT INTO portfolio_profile (id, avatar_url, updated_at)
        VALUES ('kelvin_avatar', $1, NOW())
        ON CONFLICT (id) DO UPDATE SET avatar_url = $1, updated_at = NOW()`,
       [avatarUrl]
@@ -127,10 +131,12 @@ app.post('/api/profile', async (req: Request, res: Response) => {
   }
 });
 
-// 2. Graphic Design Gallery
+// 2. Graphic design gallery
 app.get('/api/graphics', async (_req: Request, res: Response) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM portfolio_graphics ORDER BY created_at DESC');
+    const { rows } = await pool.query(
+      'SELECT * FROM portfolio_graphics ORDER BY created_at DESC'
+    );
     const formatted = rows.map((r) => ({
       id: r.id,
       title: r.title,
@@ -139,7 +145,9 @@ app.get('/api/graphics', async (_req: Request, res: Response) => {
       image: r.image_data,
       fileType: r.file_type,
       fileSize: r.file_size,
-      dateAdded: r.created_at?.toISOString().split('T')[0] || new Date().toISOString().split('T')[0],
+      dateAdded:
+        r.created_at?.toISOString().split('T')[0] ||
+        new Date().toISOString().split('T')[0],
       isUserUploaded: true
     }));
     res.json(formatted);
@@ -175,10 +183,12 @@ app.delete('/api/graphics/:id', async (req: Request, res: Response) => {
   }
 });
 
-// 3. Photography Gallery (Unlimited space via Neon)
+// 3. Photography gallery
 app.get('/api/photos', async (_req: Request, res: Response) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM portfolio_photos ORDER BY created_at DESC');
+    const { rows } = await pool.query(
+      'SELECT * FROM portfolio_photos ORDER BY created_at DESC'
+    );
     const formatted = rows.map((r) => ({
       id: r.id,
       title: r.title,
@@ -188,7 +198,9 @@ app.get('/api/photos', async (_req: Request, res: Response) => {
       image: r.image_data,
       fileType: r.file_type,
       fileSize: r.file_size,
-      dateAdded: r.created_at?.toISOString().split('T')[0] || new Date().toISOString().split('T')[0]
+      dateAdded:
+        r.created_at?.toISOString().split('T')[0] ||
+        new Date().toISOString().split('T')[0]
     }));
     res.json(formatted);
   } catch (err: any) {
@@ -223,10 +235,12 @@ app.delete('/api/photos/:id', async (req: Request, res: Response) => {
   }
 });
 
-// 4. Custom Websites
+// 4. Custom websites
 app.get('/api/websites', async (_req: Request, res: Response) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM portfolio_websites ORDER BY created_at DESC');
+    const { rows } = await pool.query(
+      'SELECT * FROM portfolio_websites ORDER BY created_at DESC'
+    );
     res.json(rows);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -248,7 +262,7 @@ app.post('/api/websites', async (req: Request, res: Response) => {
   }
 });
 
-// Setup Vite middleware for local development
+// --- Start server (Vite middleware in dev, static files in production) ---
 async function startServer() {
   const isProduction = process.env.NODE_ENV === 'production';
 
