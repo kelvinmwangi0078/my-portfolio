@@ -262,6 +262,15 @@ app.post('/api/websites', async (req: Request, res: Response) => {
   }
 });
 
+app.delete('/api/websites/:id', async (req: Request, res: Response) => {
+  try {
+    await pool.query('DELETE FROM portfolio_websites WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- Start server (Vite middleware in dev, static files in production) ---
 async function startServer() {
   const isProduction = process.env.NODE_ENV === 'production';
