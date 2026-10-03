@@ -9,7 +9,7 @@ export const INITIAL_WEB_PROJECTS: WebProject[] = [
     url: 'https://kimc-website.vercel.app?_vercel_share=9RoHHJU3cZmc7F0OIJyvg56PWF70VwSI',
     description: 'Official academic website and student portal for the Kenya Institute of Mass Communication (KIMC), featuring dynamic course listings, faculty departments, campus media publications, and responsive mobile architecture.',
     technologies: ['React', 'TypeScript', 'Tailwind CSS', 'Next.js', 'Vercel'],
-    image: '/src/assets/images/kimc_website_preview_1791048017903.jpg',
+    image: new URL('../assets/images/kimc_website_preview_1791048017903.jpg', import.meta.url).href,
     role: 'Full-Stack Web Developer & UI Designer',
     year: '2026'
   },
@@ -19,7 +19,7 @@ export const INITIAL_WEB_PROJECTS: WebProject[] = [
     url: 'https://mydms-system.vercel.app/',
     description: 'A specialized creative marketplace connecting corporate clients with verified Kenyan graphic, brand, and UI/UX designers. Engineered with role-based governance for Clients, Designers, and Administrators with guaranteed milestone security through Safaricom M-Pesa escrow.',
     technologies: ['React', 'TypeScript', 'Tailwind CSS', 'Node.js', 'Safaricom M-Pesa API', 'Vercel'],
-    image: '/src/assets/images/project_cloud_os_interface_1791045085789.jpg',
+    image: new URL('../assets/images/project_cloud_os_interface_1791045085789.jpg', import.meta.url).href,
     role: 'Lead UI/UX Designer & Full-Stack Developer',
     year: '2026'
   },
@@ -29,7 +29,7 @@ export const INITIAL_WEB_PROJECTS: WebProject[] = [
     url: 'https://unifoundsystem.vercel.app/',
     description: 'Campus-wide lost and found web management system enabling university students and administrators to report, index, verify, and safely recover lost IDs, gadgets, and personal belongings with real-time status tracking.',
     technologies: ['React', 'TypeScript', 'Tailwind CSS', 'Database Management', 'Vercel'],
-    image: '/src/assets/images/unifound_preview_1791048032222.jpg',
+    image: new URL('../assets/images/unifound_preview_1791048032222.jpg', import.meta.url).href,
     role: 'System Architect & Full-Stack Developer',
     year: '2025 – 2026'
   }
