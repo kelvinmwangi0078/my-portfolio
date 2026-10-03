@@ -170,7 +170,6 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
             <p className={`mt-2 text-sm sm:text-base max-w-xl ${
               theme === 'dark' ? 'text-neutral-400' : 'text-neutral-600'
             }`}>
-              Photographs captured across events, portraits, street sessions, and media productions over the years. Unlimited cloud storage powered by your Neon database.
             </p>
           </div>
 
