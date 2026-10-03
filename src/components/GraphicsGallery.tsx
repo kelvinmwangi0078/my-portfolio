@@ -84,8 +84,6 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
       image: previewDataUrl,
       fileType: uploadedFileType || 'IMG',
       fileSize: uploadedFileSize || '1 MB',
-      description: uploadDescription || 'Graphic design creative asset.',
-      client: uploadClient || 'Independent Client / Project',
       isUserUploaded: true,
       dateAdded: new Date().toISOString().split('T')[0]
     };
