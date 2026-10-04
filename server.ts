@@ -554,6 +554,143 @@ app.post('/api/contact', contactLimiter, smallJson, async (req: Request, res: Re
 });
 
 // ---------------------------------------------------------------------------
+// EDIT ROUTES (admin only): update details after posting.
+// Send only the fields you want to change.
+// ---------------------------------------------------------------------------
+
+// Table and column names below are fixed in code, never taken from the request.
+async function updateRow(table: string, id: string, fields: Record<string, unknown>) {
+  const cols = Object.keys(fields);
+  const sets = cols.map((c, i) => `${c} = $${i + 2}`).join(', ');
+  const result = await pool.query(`UPDATE ${table} SET ${sets} WHERE id = $1`, [
+    id,
+    ...cols.map((c) => fields[c])
+  ]);
+  return result.rowCount ?? 0;
+}
+
+// Photos: title, location, cameraInfo, description
+app.patch('/api/photos/:id', adminFailLimiter, requireAdmin, smallJson, async (req: Request, res: Response) => {
+  try {
+    if (!ID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid id' });
+    const b = req.body ?? {};
+    const fields: Record<string, unknown> = {};
+
+    if ('title' in b) {
+      const v = text(b.title, 200);
+      if (!v) return res.status(400).json({ error: 'title cannot be empty' });
+      fields.title = v;
+    }
+    const optional: Array<[string, string, number]> = [
+      ['location', 'location', 200],
+      ['cameraInfo', 'camera_info', 200],
+      ['description', 'description', 2000]
+    ];
+    for (const [key, column, max] of optional) {
+      if (key in b) {
+        const v = text(b[key], max);
+        if (v === null) return res.status(400).json({ error: `Invalid ${key}` });
+        fields[column] = v;
+      }
+    }
+
+    if (Object.keys(fields).length === 0) return res.status(400).json({ error: 'Nothing to update' });
+    const count = await updateRow('portfolio_photos', req.params.id, fields);
+    if (!count) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (err) {
+    return serverError(res, err);
+  }
+});
+
+// Graphics: title, client, description
+app.patch('/api/graphics/:id', adminFailLimiter, requireAdmin, smallJson, async (req: Request, res: Response) => {
+  try {
+    if (!ID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid id' });
+    const b = req.body ?? {};
+    const fields: Record<string, unknown> = {};
+
+    if ('title' in b) {
+      const v = text(b.title, 200);
+      if (!v) return res.status(400).json({ error: 'title cannot be empty' });
+      fields.title = v;
+    }
+    const optional: Array<[string, string, number]> = [
+      ['client', 'client', 200],
+      ['description', 'description', 2000]
+    ];
+    for (const [key, column, max] of optional) {
+      if (key in b) {
+        const v = text(b[key], max);
+        if (v === null) return res.status(400).json({ error: `Invalid ${key}` });
+        fields[column] = v;
+      }
+    }
+
+    if (Object.keys(fields).length === 0) return res.status(400).json({ error: 'Nothing to update' });
+    const count = await updateRow('portfolio_graphics', req.params.id, fields);
+    if (!count) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (err) {
+    return serverError(res, err);
+  }
+});
+
+// Websites: title, url, description, role, year, technologies, imageUrl
+app.patch('/api/websites/:id', adminFailLimiter, requireAdmin, smallJson, async (req: Request, res: Response) => {
+  try {
+    if (!ID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid id' });
+    const b = req.body ?? {};
+    const fields: Record<string, unknown> = {};
+
+    if ('title' in b) {
+      const v = text(b.title, 200);
+      if (!v) return res.status(400).json({ error: 'title cannot be empty' });
+      fields.title = v;
+    }
+    if ('url' in b) {
+      if (!isHttpUrl(b.url)) return res.status(400).json({ error: 'url must be a valid http(s) URL' });
+      fields.url = b.url;
+    }
+    if ('imageUrl' in b) {
+      if (b.imageUrl !== '' && !isHttpUrl(b.imageUrl)) {
+        return res.status(400).json({ error: 'imageUrl must be an http(s) URL or empty' });
+      }
+      fields.image_url = b.imageUrl;
+    }
+    if ('technologies' in b) {
+      if (
+        !Array.isArray(b.technologies) ||
+        b.technologies.length > 20 ||
+        !b.technologies.every((t: unknown) => typeof t === 'string' && t.length > 0 && t.length <= 50)
+      ) {
+        return res.status(400).json({ error: 'technologies must be an array of up to 20 short strings' });
+      }
+      fields.technologies = b.technologies.map((t: string) => t.trim());
+    }
+    const optional: Array<[string, string, number]> = [
+      ['description', 'description', 2000],
+      ['role', 'role', 100],
+      ['year', 'year', 20]
+    ];
+    for (const [key, column, max] of optional) {
+      if (key in b) {
+        const v = text(b[key], max);
+        if (v === null) return res.status(400).json({ error: `Invalid ${key}` });
+        fields[column] = v;
+      }
+    }
+
+    if (Object.keys(fields).length === 0) return res.status(400).json({ error: 'Nothing to update' });
+    const count = await updateRow('portfolio_websites', req.params.id, fields);
+    if (!count) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (err) {
+    return serverError(res, err);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Unknown API routes and error handling
 // ---------------------------------------------------------------------------
 app.use('/api', (_req, res) => {
