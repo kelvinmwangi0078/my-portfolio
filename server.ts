@@ -4,7 +4,6 @@ import rateLimit from 'express-rate-limit';
 import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import { Pool } from 'pg';
-import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -472,17 +471,13 @@ app.delete('/api/websites/:id', adminFailLimiter, requireAdmin, async (req: Requ
   }
 });
 
-// 5. Contact form — sends email via Nodemailer + Gmail
-const mailer =
-  process.env.EMAIL_USER && process.env.EMAIL_PASS
-    ? nodemailer.createTransport({
-        service: 'gmail',
-        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
-      })
-    : null;
+// 5. Contact form — sends email through Resend's HTTPS API (works where SMTP ports are blocked)
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const CONTACT_TO = process.env.CONTACT_TO;
+const CONTACT_FROM = process.env.CONTACT_FROM || 'Portfolio Contact <onboarding@resend.dev>';
 
-if (!mailer) {
-  console.warn('EMAIL_USER / EMAIL_PASS not set: the contact form will return an error.');
+if (!RESEND_API_KEY || !CONTACT_TO) {
+  console.warn('RESEND_API_KEY / CONTACT_TO not set: the contact form will return an error.');
 }
 
 app.post('/api/contact', contactLimiter, smallJson, async (req: Request, res: Response) => {
@@ -509,36 +504,47 @@ app.post('/api/contact', contactLimiter, smallJson, async (req: Request, res: Re
   if (!EMAIL_RE.test(email)) {
     return res.status(400).json({ success: false, message: 'Please enter a valid email address.' });
   }
-  if (!mailer) {
-    console.error('EMAIL_USER or EMAIL_PASS is not set.');
+  if (!RESEND_API_KEY || !CONTACT_TO) {
+    console.error('RESEND_API_KEY or CONTACT_TO is not set.');
     return res.status(503).json({ success: false, message: 'Email is not configured.' });
   }
 
   const safeName = oneLine(name);
   const safeSubject = oneLine(subject);
-  const to = process.env.CONTACT_TO || process.env.EMAIL_USER;
 
   try {
-    await mailer.sendMail({
-      from: `"Portfolio Contact" <${process.env.EMAIL_USER}>`,
-      to,
-      replyTo: email,
-      subject: safeSubject
-        ? `Inquiry: ${safeSubject}`
-        : `New message from ${safeName || 'Website Visitor'}`,
-      text: `Name: ${safeName || 'N/A'}\nEmail: ${email}\nSubject: ${safeSubject || 'N/A'}\n\n${message}`,
-      html: `
-        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #E2B714;">New Portfolio Message</h2>
-          <p><strong>Name:</strong> ${escapeHtml(safeName) || 'N/A'}</p>
-          <p><strong>Email:</strong> ${escapeHtml(email)}</p>
-          <p><strong>Subject:</strong> ${escapeHtml(safeSubject) || 'N/A'}</p>
-          <hr style="border: 1px solid #eee;" />
-          <p><strong>Message:</strong></p>
-          <p style="white-space: pre-wrap;">${escapeHtml(message)}</p>
-        </div>
-      `
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      signal: AbortSignal.timeout(10000),
+      body: JSON.stringify({
+        from: CONTACT_FROM,
+        to: [CONTACT_TO],
+        reply_to: email,
+        subject: safeSubject
+          ? `Inquiry: ${safeSubject}`
+          : `New message from ${safeName || 'Website Visitor'}`,
+        text: `Name: ${safeName || 'N/A'}\nEmail: ${email}\nSubject: ${safeSubject || 'N/A'}\n\n${message}`,
+        html: `
+          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #E2B714;">New Portfolio Message</h2>
+            <p><strong>Name:</strong> ${escapeHtml(safeName) || 'N/A'}</p>
+            <p><strong>Email:</strong> ${escapeHtml(email)}</p>
+            <p><strong>Subject:</strong> ${escapeHtml(safeSubject) || 'N/A'}</p>
+            <hr style="border: 1px solid #eee;" />
+            <p><strong>Message:</strong></p>
+            <p style="white-space: pre-wrap;">${escapeHtml(message)}</p>
+          </div>
+        `
+      })
     });
+
+    if (!response.ok) {
+      throw new Error(`Resend responded ${response.status}: ${await response.text()}`);
+    }
 
     res.status(200).json({ success: true });
   } catch (err) {
