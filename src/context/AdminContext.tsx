@@ -1,10 +1,14 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+
+export type LoginResult = 'ok' | 'invalid' | 'locked' | 'error';
 
 interface AdminContextType {
   isAdmin: boolean;
-  adminPasscode: string;
-  login: (code: string) => boolean;
+  adminToken: string;
+  login: (code: string) => Promise<LoginResult>;
   logout: () => void;
+  /** fetch() that adds the admin token. Use it for every POST / PATCH / DELETE. */
+  adminFetch: (input: string, init?: RequestInit) => Promise<Response>;
   openAdminModal: () => void;
   closeAdminModal: () => void;
   isModalOpen: boolean;
@@ -12,32 +16,52 @@ interface AdminContextType {
 
 const AdminContext = createContext<AdminContextType | undefined>(undefined);
 
-const VALID_PASSCODES = [
-  '@Hackmeifyoucan~',
-  '@Hackmeifyoucan',
-  '@Hackmeifyoucan$$~',
-  'kelvin0078',
-  '0712539685'
-];
+// Kept in sessionStorage: survives a page refresh, cleared when the tab is closed.
+const TOKEN_KEY = 'kw_portfolio_admin_token';
+
+function readToken(): string {
+  try {
+    return sessionStorage.getItem(TOKEN_KEY) || '';
+  } catch {
+    return '';
+  }
+}
 
 export const AdminProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [isAdmin, setIsAdmin] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('kw_portfolio_is_admin') === 'true';
-    } catch {
-      return false;
-    }
-  });
-
-  const [adminPasscode, setAdminPasscode] = useState<string>(() => {
-    try {
-      return localStorage.getItem('kw_portfolio_admin_passcode') || '@Hackmeifyoucan~';
-    } catch {
-      return '@Hackmeifyoucan~';
-    }
-  });
-
+  const [adminToken, setAdminToken] = useState<string>(readToken);
   const [isModalOpen, setIsModalOpen] = useState(false);
+
+  // Being "admin" simply means we hold a token. The server is what really enforces it.
+  const isAdmin = adminToken !== '';
+
+  const logout = useCallback(() => {
+    setAdminToken('');
+    try {
+      sessionStorage.removeItem(TOKEN_KEY);
+    } catch (err) {
+      console.warn(err);
+    }
+  }, []);
+
+  // One-time cleanup of the old insecure flags, and re-check any saved token with the server.
+  useEffect(() => {
+    try {
+      localStorage.removeItem('kw_portfolio_is_admin');
+      localStorage.removeItem('kw_portfolio_admin_passcode');
+    } catch {
+      /* ignore */
+    }
+
+    const saved = readToken();
+    if (!saved) return;
+    fetch('/api/admin/check', { headers: { Authorization: `Bearer ${saved}` } })
+      .then((res) => {
+        if (res.status === 401) logout();
+      })
+      .catch(() => {
+        /* offline: keep the session, the server will still reject bad requests */
+      });
+  }, [logout]);
 
   // Global keyboard shortcut to toggle admin modal: Alt + L or Ctrl + Shift + L
   useEffect(() => {
@@ -51,28 +75,43 @@ export const AdminProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  const login = (code: string): boolean => {
-    const trimmed = code.trim();
-    if (trimmed === adminPasscode || VALID_PASSCODES.includes(trimmed)) {
-      setIsAdmin(true);
-      try {
-        localStorage.setItem('kw_portfolio_is_admin', 'true');
-      } catch (err) {
-        console.warn(err);
+  const login = async (code: string): Promise<LoginResult> => {
+    const token = code.trim();
+    if (!token) return 'invalid';
+    try {
+      const res = await fetch('/api/admin/check', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        setAdminToken(token);
+        try {
+          sessionStorage.setItem(TOKEN_KEY, token);
+        } catch (err) {
+          console.warn(err);
+        }
+        return 'ok';
       }
-      return true;
+      if (res.status === 401) return 'invalid';
+      if (res.status === 429) return 'locked';
+      return 'error';
+    } catch {
+      return 'error';
     }
-    return false;
   };
 
-  const logout = () => {
-    setIsAdmin(false);
-    try {
-      localStorage.removeItem('kw_portfolio_is_admin');
-    } catch (err) {
-      console.warn(err);
-    }
-  };
+  const adminFetch = useCallback(
+    async (input: string, init: RequestInit = {}): Promise<Response> => {
+      const headers = new Headers(init.headers);
+      headers.set('Authorization', `Bearer ${adminToken}`);
+      if (init.body && !headers.has('Content-Type')) {
+        headers.set('Content-Type', 'application/json');
+      }
+      const res = await fetch(input, { ...init, headers });
+      if (res.status === 401) logout(); // token no longer valid: drop back to public view
+      return res;
+    },
+    [adminToken, logout]
+  );
 
   const openAdminModal = () => setIsModalOpen(true);
   const closeAdminModal = () => setIsModalOpen(false);
@@ -81,9 +120,10 @@ export const AdminProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     <AdminContext.Provider
       value={{
         isAdmin,
-        adminPasscode,
+        adminToken,
         login,
         logout,
+        adminFetch,
         openAdminModal,
         closeAdminModal,
         isModalOpen
