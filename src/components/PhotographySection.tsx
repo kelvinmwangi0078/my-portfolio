@@ -159,7 +159,6 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
               <span aria-hidden="true">·</span>
               <span className="flex items-center gap-1 text-emerald-400">
                 <Database className="w-3 h-3" />
-                <span>Neon Cloud Database Storage</span>
               </span>
             </div>
             <h2 className={`text-3xl sm:text-4xl font-bold tracking-tight ${
