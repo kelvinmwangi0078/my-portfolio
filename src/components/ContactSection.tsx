@@ -13,6 +13,8 @@ export const ContactSection: React.FC<ContactSectionProps> = ({ theme }) => {
   const [copiedEmail, setCopiedEmail] = useState(false);
   const [copiedPhone, setCopiedPhone] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
 
   const contactEmail = 'kelvinmwangi0078@gmail.com';
   const contactPhone = '0712539685';
@@ -32,17 +34,32 @@ export const ContactSection: React.FC<ContactSectionProps> = ({ theme }) => {
     setTimeout(() => setCopiedPhone(false), 2000);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !message) return;
 
-    const emailSubject = encodeURIComponent(subject ? `Inquiry: ${subject}` : `Project Inquiry from ${name || 'Website Visitor'}`);
-    const emailBody = encodeURIComponent(
-      `Hi Kelvin,\n\nName: ${name}\nEmail: ${email}\n\nMessage:\n${message}\n\nSent via Portfolio Contact Form`
-    );
-    window.location.href = `mailto:${contactEmail}?subject=${emailSubject}&body=${emailBody}`;
+    setSending(true);
+    setError('');
 
-    setSubmitted(true);
+    try {
+      const res = await fetch('/api/contact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, email, subject, message }),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        setSubmitted(true);
+      } else {
+        setError('Something went wrong. Please try again.');
+      }
+    } catch {
+      setError('Network error. Please try again.');
+    } finally {
+      setSending(false);
+    }
   };
 
   const downloadVCard = () => {
@@ -88,7 +105,7 @@ END:VCARD`;
                   theme === 'dark' ? 'text-white' : 'text-neutral-950'
                 }`}
               >
-                Let’s build something extraordinary.
+                Let's build something extraordinary.
               </h2>
               <p
                 className={`mt-3 text-sm sm:text-base leading-relaxed ${
@@ -252,7 +269,7 @@ END:VCARD`;
             </div>
           </div>
 
-          {/* Right Column: Clean Message Form (Target budget & estimated timeline removed) */}
+          {/* Right Column: Clean Message Form */}
           <div className="lg:col-span-7">
             <div
               className={`p-6 sm:p-8 rounded-2xl border ${
@@ -277,10 +294,16 @@ END:VCARD`;
                   </div>
                   <h4 className="text-2xl font-bold">Message Dispatched!</h4>
                   <p className="text-sm text-neutral-400 max-w-md mx-auto leading-relaxed">
-                    Thank you, {name || 'friend'}. Your message has been prepared for dispatch to {contactEmail}. I will get back to you shortly.
+                    Thank you, {name || 'friend'}. Your message has been sent directly to my inbox. I will get back to you shortly.
                   </p>
                   <button
-                    onClick={() => setSubmitted(false)}
+                    onClick={() => {
+                      setSubmitted(false);
+                      setName('');
+                      setEmail('');
+                      setSubject('');
+                      setMessage('');
+                    }}
                     className="text-xs font-semibold text-[#E2B714] hover:underline cursor-pointer"
                   >
                     Send another message →
@@ -288,7 +311,6 @@ END:VCARD`;
                 </div>
               ) : (
                 <form onSubmit={handleSubmit} className="space-y-4">
-                  {/* Name and Email */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div className="space-y-1.5">
                       <label className="block text-xs font-semibold text-neutral-400">Your Name</label>
@@ -323,7 +345,6 @@ END:VCARD`;
                     </div>
                   </div>
 
-                  {/* Subject */}
                   <div className="space-y-1.5">
                     <label className="block text-xs font-semibold text-neutral-400">Subject / Project Topic</label>
                     <input
@@ -339,11 +360,8 @@ END:VCARD`;
                     />
                   </div>
 
-                  {/* Message */}
                   <div className="space-y-1.5">
-                    <label className="block text-xs font-semibold text-neutral-400">
-                      Message
-                    </label>
+                    <label className="block text-xs font-semibold text-neutral-400">Message</label>
                     <textarea
                       required
                       rows={5}
@@ -358,11 +376,14 @@ END:VCARD`;
                     />
                   </div>
 
+                  {error && <p className="text-xs text-red-400">{error}</p>}
+
                   <button
                     type="submit"
-                    className="w-full py-3.5 px-4 rounded-xl text-xs font-bold uppercase tracking-wider bg-[#E2B714] text-neutral-950 hover:bg-[#F0C52B] transition-all flex items-center justify-center gap-2 shadow-md cursor-pointer"
+                    disabled={sending}
+                    className="w-full py-3.5 px-4 rounded-xl text-xs font-bold uppercase tracking-wider bg-[#E2B714] text-neutral-950 hover:bg-[#F0C52B] transition-all flex items-center justify-center gap-2 shadow-md cursor-pointer disabled:opacity-60"
                   >
-                    <span>Send Message</span>
+                    <span>{sending ? 'Sending...' : 'Send Message'}</span>
                     <Send className="w-3.5 h-3.5" />
                   </button>
                 </form>
