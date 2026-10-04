@@ -9,47 +9,42 @@ interface GraphicsGalleryProps {
 
 export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
   const { isAdmin } = useAdmin();
-  const [items, setItems] = useState<GraphicItem[]>(() => {
-    try {
-      const saved = localStorage.getItem('kw_graphic_gallery_uploads');
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {
-      console.error('Error loading gallery from localStorage:', e);
-    }
-    return [];
-  });
+  const [items, setItems] = useState<GraphicItem[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
   const [lightboxItem, setLightboxItem] = useState<GraphicItem | null>(null);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
 
-  // Sync with Neon DB on mount
+  // Load the gallery from Neon so every device sees the same artworks
   useEffect(() => {
     fetch('/api/graphics')
       .then((res) => {
-        if (res.ok) return res.json();
-        throw new Error('No graphics in DB');
+        if (!res.ok) throw new Error('Server returned ' + res.status);
+        return res.json();
       })
       .then((data: GraphicItem[]) => {
-        if (Array.isArray(data) && data.length > 0) {
-          setItems(data);
-          localStorage.setItem('kw_graphic_gallery_uploads', JSON.stringify(data));
-        }
+        if (Array.isArray(data)) setItems(data);
       })
       .catch((err) => {
         console.warn('Graphics fetch notice:', err);
-      });
+      })
+      .finally(() => setIsLoading(false));
   }, []);
 
   // Upload Form State
   const [uploadTitle, setUploadTitle] = useState('');
+  const [uploadClient, setUploadClient] = useState('');
+  const [uploadDescription, setUploadDescription] = useState('');
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null);
   const [uploadedFileName, setUploadedFileName] = useState('');
   const [uploadedFileSize, setUploadedFileSize] = useState('');
   const [uploadedFileType, setUploadedFileType] = useState('');
   const [uploadSuccess, setUploadSuccess] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // A ref blocks a second click instantly, before React has re-rendered the button as disabled
+  const uploadingRef = useRef(false);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -74,6 +69,11 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
   const handleSaveUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!previewDataUrl || !uploadTitle) return;
+    if (uploadingRef.current) return; // already uploading, ignore extra clicks
+
+    uploadingRef.current = true;
+    setIsUploading(true);
+    setUploadError('');
 
     const newItem: GraphicItem = {
       id: 'upload-' + Date.now(),
@@ -82,58 +82,53 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
       image: previewDataUrl,
       fileType: uploadedFileType || 'IMG',
       fileSize: uploadedFileSize || '1 MB',
-     
+      client: uploadClient.trim(),
+      description: uploadDescription.trim(),
       isUserUploaded: true,
       dateAdded: new Date().toISOString().split('T')[0]
     };
 
-    // Save to Neon DB
     try {
-      await fetch('/api/graphics', {
+      const res = await fetch('/api/graphics', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newItem)
       });
+      if (!res.ok) throw new Error('Server returned ' + res.status);
+
+      setItems((prev) => [newItem, ...prev]);
+      setUploadSuccess(true);
+      setTimeout(() => {
+        setUploadSuccess(false);
+        setIsUploadModalOpen(false);
+        setUploadTitle('');
+        setUploadClient('');
+        setUploadDescription('');
+        setPreviewDataUrl(null);
+        setUploadedFileName('');
+        setUploadedFileSize('');
+        setUploadedFileType('');
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }, 700);
     } catch (err) {
-      console.warn('Neon DB sync notice:', err);
+      console.error('Could not save artwork:', err);
+      setUploadError('Could not save the artwork. Please try again.');
+    } finally {
+      uploadingRef.current = false;
+      setIsUploading(false);
     }
-
-    const updated = [newItem, ...items];
-    setItems(updated);
-
-    try {
-      localStorage.setItem('kw_graphic_gallery_uploads', JSON.stringify(updated));
-    } catch (err) {
-      console.warn('Could not persist to localStorage:', err);
-    }
-
-    setUploadSuccess(true);
-    setTimeout(() => {
-      setUploadSuccess(false);
-      setIsUploadModalOpen(false);
-      setUploadTitle('');
-   
-      setPreviewDataUrl(null);
-      setUploadedFileName('');
-    }, 700);
   };
 
   const handleDeleteItem = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
-      await fetch(`/api/graphics/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/graphics/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Server returned ' + res.status);
+      setItems((prev) => prev.filter((item) => item.id !== id));
+      if (lightboxItem?.id === id) setLightboxItem(null);
     } catch (err) {
-      console.error(err);
+      console.error('Could not delete artwork:', err);
     }
-
-    const updated = items.filter(item => item.id !== id);
-    setItems(updated);
-    try {
-      localStorage.setItem('kw_graphic_gallery_uploads', JSON.stringify(updated));
-    } catch (err) {
-      console.error(err);
-    }
-    if (lightboxItem?.id === id) setLightboxItem(null);
   };
 
   return (
@@ -177,7 +172,9 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
         </div>
 
         {/* Gallery Content */}
-        {items.length === 0 ? (
+        {isLoading ? (
+          <div className="py-12 text-center text-xs text-neutral-400">Loading gallery...</div>
+        ) : items.length === 0 ? (
           isAdmin ? (
             /* Admin Empty State */
             <div
@@ -389,6 +386,8 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
                     <label className="block text-xs font-semibold text-neutral-400">Client / Brand (Optional)</label>
                     <input
                       type="text"
+                      value={uploadClient}
+                      onChange={(e) => setUploadClient(e.target.value)}
                       placeholder="e.g. Kipawa Organics / Freelance"
                       className={`w-full py-2 px-3 rounded-lg border text-xs focus:outline-none focus:border-[#E2B714] ${
                         theme === 'dark' ? 'bg-[#12141F] border-[#252839] text-white' : 'bg-neutral-50 border-neutral-300'
@@ -401,6 +400,8 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
                     <label className="block text-xs font-semibold text-neutral-400">Description (Optional)</label>
                     <textarea
                       rows={2}
+                      value={uploadDescription}
+                      onChange={(e) => setUploadDescription(e.target.value)}
                       placeholder="Brief notes about the design, tools used, or client context..."
                       className={`w-full py-2 px-3 rounded-lg border text-xs focus:outline-none focus:border-[#E2B714] ${
                         theme === 'dark' ? 'bg-[#12141F] border-[#252839] text-white' : 'bg-neutral-50 border-neutral-300'
@@ -408,13 +409,15 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
                     />
                   </div>
 
+                  {uploadError && <p className="text-xs text-rose-400">{uploadError}</p>}
+
                   {/* Submit Button */}
                   <button
                     type="submit"
-                    disabled={!previewDataUrl}
+                    disabled={!previewDataUrl || isUploading}
                     className="w-full py-3 rounded-xl text-xs font-bold uppercase tracking-wider bg-[#E2B714] text-neutral-950 hover:bg-[#F0C52B] transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-md cursor-pointer"
                   >
-                    Add Artwork to Gallery
+                    {isUploading ? 'Uploading...' : 'Add Artwork to Gallery'}
                   </button>
                 </form>
               )}
