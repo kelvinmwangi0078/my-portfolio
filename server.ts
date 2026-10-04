@@ -32,11 +32,6 @@ if (!rawConnectionString) {
 }
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
-console.log('ADMIN_TOKEN present:', ADMIN_TOKEN !== undefined, '| length:', ADMIN_TOKEN?.length ?? 0);
-console.log(
-  'Env keys containing ADMIN:',
-  Object.keys(process.env).filter((k) => k.toUpperCase().includes('ADMIN')).map((k) => JSON.stringify(k))
-);
 if (!ADMIN_TOKEN || ADMIN_TOKEN.length < 16) {
   throw new Error(
     'ADMIN_TOKEN is not set or too short (min 16 chars). Generate one with: openssl rand -hex 32'
