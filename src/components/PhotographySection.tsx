@@ -9,7 +9,43 @@ interface PhotographySectionProps {
 
 // Must match what the server accepts.
 const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'];
-const MAX_FILE_BYTES = 15 * 1024 * 1024;
+// Originals can be large because they are shrunk in the browser before upload.
+const MAX_FILE_BYTES = 40 * 1024 * 1024;
+const MAX_SIDE_PX = 1600;
+const JPEG_QUALITY = 0.82;
+
+/** Shrinks an image to at most MAX_SIDE_PX on its longest side and re-encodes it as JPEG. */
+async function resizeImage(file: File): Promise<{ dataUrl: string; bytes: number }> {
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Could not read this image'));
+      el.src = objectUrl;
+    });
+
+    const scale = Math.min(1, MAX_SIDE_PX / Math.max(img.naturalWidth, img.naturalHeight));
+    const width = Math.round(img.naturalWidth * scale);
+    const height = Math.round(img.naturalHeight * scale);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Image processing is not supported in this browser');
+
+    ctx.fillStyle = '#ffffff'; // PNGs with transparency would otherwise turn black as JPEG
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+
+    const dataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+    const bytes = Math.round(((dataUrl.length - dataUrl.indexOf(',') - 1) * 3) / 4);
+    return { dataUrl, bytes };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
 
 export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme }) => {
   const { isAdmin, adminFetch } = useAdmin();
@@ -30,6 +66,7 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
   const [uploadedFileType, setUploadedFileType] = useState('');
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const [uploadError, setUploadError] = useState('');
+  const [processing, setProcessing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Edit form state
@@ -74,7 +111,7 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
       });
   }, []);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -83,25 +120,36 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
       return;
     }
     if (file.size > MAX_FILE_BYTES) {
-      setUploadError('That image is larger than 15 MB. Please compress or resize it first.');
+      setUploadError('That image is larger than 40 MB. Please choose a smaller file.');
       return;
     }
     setUploadError('');
+    setProcessing(true);
 
-    setUploadedFileName(file.name);
-    setUploadedFileType(file.type.split('/')[1]?.toUpperCase() || 'JPG');
-    setUploadedFileSize((file.size / (1024 * 1024)).toFixed(2) + ' MB');
+    try {
+      // Shrink before uploading: a 5 MB camera photo becomes a few hundred KB.
+      const { dataUrl, bytes } = await resizeImage(file);
 
-    if (!photoTitle) {
-      const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ');
-      setPhotoTitle(cleanName.charAt(0).toUpperCase() + cleanName.slice(1));
+      setPreviewDataUrl(dataUrl);
+      setUploadedFileName(file.name);
+      setUploadedFileType('JPEG');
+      setUploadedFileSize(
+        bytes >= 1024 * 1024
+          ? (bytes / (1024 * 1024)).toFixed(2) + ' MB'
+          : Math.max(1, Math.round(bytes / 1024)) + ' KB'
+      );
+
+      if (!photoTitle) {
+        const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ');
+        setPhotoTitle(cleanName.charAt(0).toUpperCase() + cleanName.slice(1));
+      }
+    } catch (err) {
+      console.error(err);
+      setPreviewDataUrl(null);
+      setUploadError('Could not process that image. Try a different file.');
+    } finally {
+      setProcessing(false);
     }
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      setPreviewDataUrl(event.target?.result as string);
-    };
-    reader.readAsDataURL(file);
   };
 
   const handleSavePhoto = async (e: React.FormEvent) => {
@@ -488,7 +536,9 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
                       <div className="space-y-2">
                         <Camera className="w-8 h-8 mx-auto text-neutral-400" />
                         <div className="text-xs font-semibold">
-                          Click to select a photograph (JPG, PNG, WEBP, GIF or AVIF, up to 15 MB)
+                          {processing
+                            ? 'Optimizing image...'
+                            : 'Click to select a photograph (JPG, PNG, WEBP, GIF or AVIF). It is resized automatically.'}
                         </div>
                       </div>
                     )}
@@ -552,10 +602,10 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
 
                   <button
                     type="submit"
-                    disabled={!previewDataUrl || loading}
+                    disabled={!previewDataUrl || loading || processing}
                     className="w-full py-3 rounded-xl text-xs font-bold uppercase tracking-wider bg-[#E2B714] text-neutral-950 hover:bg-[#F0C52B] transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-md cursor-pointer"
                   >
-                    {loading ? 'Saving...' : 'Save Photograph to Gallery'}
+                    {processing ? 'Optimizing image...' : loading ? 'Saving...' : 'Save Photograph to Gallery'}
                   </button>
                 </form>
               )}
