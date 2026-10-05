@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Palette, Code2, Sparkles, Camera, Upload, User, Check, RefreshCw, Lock } from 'lucide-react';
+import { Palette, Code2, Sparkles, Camera, User, Check, RefreshCw } from 'lucide-react';
 import { useAdmin } from '../context/AdminContext';
 
 interface HeroProps {
@@ -8,64 +8,127 @@ interface HeroProps {
   onExploreWeb: () => void;
 }
 
+// Must match what the server accepts.
+const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'];
+const MAX_FILE_BYTES = 40 * 1024 * 1024;
+const AVATAR_MAX_SIDE_PX = 1000;
+const AVATAR_JPEG_QUALITY = 0.85;
+
+/** Shrinks an image to at most AVATAR_MAX_SIDE_PX on its longest side and re-encodes it as JPEG. */
+async function resizeImage(file: File): Promise<string> {
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Could not read this image'));
+      el.src = objectUrl;
+    });
+
+    const scale = Math.min(1, AVATAR_MAX_SIDE_PX / Math.max(img.naturalWidth, img.naturalHeight));
+    const width = Math.round(img.naturalWidth * scale);
+    const height = Math.round(img.naturalHeight * scale);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Image processing is not supported in this browser');
+
+    ctx.fillStyle = '#ffffff'; // PNGs with transparency would otherwise turn black as JPEG
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+
+    return canvas.toDataURL('image/jpeg', AVATAR_JPEG_QUALITY);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+const errorText = (status: number): string => {
+  if (status === 401) return 'Admin session expired. Unlock admin mode again.';
+  if (status === 413) return 'The image is too large for the server.';
+  if (status === 429) return 'Too many requests. Please wait a few minutes.';
+  return 'The server could not save the photo. Please try again.';
+};
+
 export const Hero: React.FC<HeroProps> = ({ theme, onExploreGraphics, onExploreWeb }) => {
-  const { isAdmin } = useAdmin();
-  const [avatar, setAvatar] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem('kw_profile_avatar');
-    } catch {
-      return null;
-    }
-  });
+  const { isAdmin, adminFetch } = useAdmin();
+  const [avatar, setAvatar] = useState<string | null>(null);
+  const [avatarLoading, setAvatarLoading] = useState(true);
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [error, setError] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Fetch avatar from Neon DB on mount
+  // The database is the only source of truth, so every device shows the same photo.
+  // (The old browser-only copy is removed.)
   useEffect(() => {
+    try {
+      localStorage.removeItem('kw_profile_avatar');
+    } catch {
+      /* ignore */
+    }
+
     fetch('/api/profile')
       .then((res) => {
         if (res.ok) return res.json();
-        throw new Error('No profile in DB');
+        throw new Error('Could not load profile');
       })
       .then((data) => {
-        if (data.avatarUrl) {
-          setAvatar(data.avatarUrl);
-          localStorage.setItem('kw_profile_avatar', data.avatarUrl);
-        }
+        if (data.avatarUrl) setAvatar(data.avatarUrl);
       })
       .catch((err) => {
-        console.warn('Avatar DB fetch notice:', err);
-      });
+        console.warn('Avatar fetch notice:', err);
+      })
+      .finally(() => setAvatarLoading(false));
   }, []);
 
   const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const input = e.target;
+    const file = input.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      const dataUrl = event.target?.result as string;
-      setAvatar(dataUrl);
-      localStorage.setItem('kw_profile_avatar', dataUrl);
+    setError('');
 
-      setSaving(true);
-      try {
-        await fetch('/api/profile', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ avatarUrl: dataUrl })
-        });
-        setSaveSuccess(true);
-        setTimeout(() => setSaveSuccess(false), 2000);
-      } catch (err) {
-        console.error('Failed to sync avatar to Neon DB:', err);
-      } finally {
-        setSaving(false);
+    if (!ALLOWED_TYPES.includes(file.type)) {
+      setError('Choose a PNG, JPEG, WEBP, GIF or AVIF image.');
+      input.value = '';
+      return;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      setError('That image is larger than 40 MB. Choose a smaller file.');
+      input.value = '';
+      return;
+    }
+
+    setSaving(true);
+    try {
+      // Shrink first, then send to the server with the admin token.
+      const dataUrl = await resizeImage(file);
+
+      const res = await adminFetch('/api/profile', {
+        method: 'POST',
+        body: JSON.stringify({ avatarUrl: dataUrl })
+      });
+
+      // Only change what is shown if the server really saved it.
+      if (!res.ok) {
+        setError(errorText(res.status));
+        return;
       }
-    };
-    reader.readAsDataURL(file);
+
+      setAvatar(dataUrl);
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2000);
+    } catch (err) {
+      console.error('Failed to save avatar:', err);
+      setError('Could not save the photo. Check your connection and try again.');
+    } finally {
+      setSaving(false);
+      input.value = ''; // lets you pick the same file again
+    }
   };
 
   return (
@@ -170,7 +233,7 @@ export const Hero: React.FC<HeroProps> = ({ theme, onExploreGraphics, onExploreW
                     alt="Kelvin Mwangi Wambui"
                     className="w-full h-full object-cover object-center"
                   />
-                ) : (
+                ) : !avatarLoading ? (
                   <div
                     onClick={() => isAdmin && fileInputRef.current?.click()}
                     className={`w-full h-full flex flex-col items-center justify-center p-6 text-center bg-gradient-to-br from-[#12141F] to-[#0A0B10] ${
@@ -190,7 +253,7 @@ export const Hero: React.FC<HeroProps> = ({ theme, onExploreGraphics, onExploreW
                       </span>
                     )}
                   </div>
-                )}
+                ) : null}
 
                 {/* Scrim Overlay */}
                 <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/20 to-transparent pointer-events-none" />
@@ -209,7 +272,8 @@ export const Hero: React.FC<HeroProps> = ({ theme, onExploreGraphics, onExploreW
                   {isAdmin && (
                     <button
                       onClick={() => fileInputRef.current?.click()}
-                      className="px-3 py-1.5 rounded-lg bg-black/70 hover:bg-[#E2B714] hover:text-neutral-950 border border-white/20 text-white text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer backdrop-blur-xs"
+                      disabled={saving}
+                      className="px-3 py-1.5 rounded-lg bg-black/70 hover:bg-[#E2B714] hover:text-neutral-950 border border-white/20 text-white text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer backdrop-blur-xs disabled:opacity-50 disabled:cursor-not-allowed"
                       title="Upload or change photo"
                     >
                       <Camera className="w-3.5 h-3.5" />
@@ -223,7 +287,7 @@ export const Hero: React.FC<HeroProps> = ({ theme, onExploreGraphics, onExploreW
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/*, .png, .jpg, .jpeg, .webp"
+                    accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                     onChange={handleAvatarChange}
                     className="hidden"
                   />
@@ -246,6 +310,8 @@ export const Hero: React.FC<HeroProps> = ({ theme, onExploreGraphics, onExploreW
                     <RefreshCw className="w-3 h-3 animate-spin" />
                     <span>Saving...</span>
                   </span>
+                ) : isAdmin && error ? (
+                  <span className="text-rose-400 text-right">{error}</span>
                 ) : (
                   <span>Nairobi, Kenya</span>
                 )}
