@@ -62,6 +62,16 @@ const MAX_IMAGE_CHARS = 25 * 1024 * 1024;
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 300,
+  skip: (req) => req.path.endsWith('/image'), // images have their own, higher limit below
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again later.' }
+});
+
+// A gallery page loads many images at once, and visitors on mobile networks often share an IP.
+const imageLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 1000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests. Please try again later.' }
@@ -153,6 +163,33 @@ function escapeHtml(s: string): string {
 function serverError(res: Response, err: unknown) {
   console.error(err);
   return res.status(500).json({ error: 'Internal server error' });
+}
+
+// Serves an image stored as a base64 data URL as a real image file the browser can cache.
+const STORED_IMAGE_HEADER_RE = /^data:(image\/(?:png|jpeg|webp|gif|avif));base64$/;
+
+async function sendStoredImage(
+  res: Response,
+  table: 'portfolio_photos' | 'portfolio_graphics',
+  id: string
+) {
+  if (!ID_RE.test(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  const { rows } = await pool.query(`SELECT image_data FROM ${table} WHERE id = $1`, [id]);
+  const data: string | undefined = rows[0]?.image_data;
+  if (!data) return res.status(404).json({ error: 'Not found' });
+
+  const comma = data.indexOf(',');
+  const match = comma > 0 ? STORED_IMAGE_HEADER_RE.exec(data.slice(0, comma)) : null;
+  if (!match) return res.status(415).json({ error: 'Unsupported image' });
+
+  res.set({
+    'Content-Type': match[1],
+    // An image never changes once uploaded (edits only change text), so it can be cached for a year.
+    'Cache-Control': 'public, max-age=31536000, immutable',
+    'X-Content-Type-Options': 'nosniff'
+  });
+  return res.send(Buffer.from(data.slice(comma + 1), 'base64'));
 }
 
 // ---------------------------------------------------------------------------
@@ -272,14 +309,15 @@ app.post('/api/profile', adminFailLimiter, requireAdmin, uploadJson, async (req:
 app.get('/api/graphics', async (_req: Request, res: Response) => {
   try {
     const { rows } = await pool.query(
-      'SELECT * FROM portfolio_graphics ORDER BY created_at DESC'
+      `SELECT id, title, client, description, file_type, file_size, created_at
+       FROM portfolio_graphics ORDER BY created_at DESC`
     );
     const formatted = rows.map((r) => ({
       id: r.id,
       title: r.title,
       client: r.client,
       description: r.description,
-      image: r.image_data,
+      image: `/api/graphics/${r.id}/image`,
       fileType: r.file_type,
       fileSize: r.file_size,
       dateAdded:
@@ -334,8 +372,10 @@ app.delete('/api/graphics/:id', adminFailLimiter, requireAdmin, async (req: Requ
 // 3. Photography gallery
 app.get('/api/photos', async (_req: Request, res: Response) => {
   try {
+    // image_data is deliberately not selected: each image is fetched separately from /api/photos/:id/image
     const { rows } = await pool.query(
-      'SELECT * FROM portfolio_photos ORDER BY created_at DESC'
+      `SELECT id, title, location, camera_info, description, file_type, file_size, created_at
+       FROM portfolio_photos ORDER BY created_at DESC`
     );
     const formatted = rows.map((r) => ({
       id: r.id,
@@ -343,7 +383,7 @@ app.get('/api/photos', async (_req: Request, res: Response) => {
       location: r.location,
       cameraInfo: r.camera_info,
       description: r.description,
-      image: r.image_data,
+      image: `/api/photos/${r.id}/image`,
       fileType: r.file_type,
       fileSize: r.file_size,
       dateAdded:
@@ -550,6 +590,25 @@ app.post('/api/contact', contactLimiter, smallJson, async (req: Request, res: Re
   } catch (err) {
     console.error('Mail error:', err);
     res.status(500).json({ success: false, message: 'Failed to send email.' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// IMAGE ROUTES (public): one image per request, cached by the browser.
+// ---------------------------------------------------------------------------
+app.get('/api/photos/:id/image', imageLimiter, async (req: Request, res: Response) => {
+  try {
+    await sendStoredImage(res, 'portfolio_photos', req.params.id);
+  } catch (err) {
+    return serverError(res, err);
+  }
+});
+
+app.get('/api/graphics/:id/image', imageLimiter, async (req: Request, res: Response) => {
+  try {
+    await sendStoredImage(res, 'portfolio_graphics', req.params.id);
+  } catch (err) {
+    return serverError(res, err);
   }
 });
 

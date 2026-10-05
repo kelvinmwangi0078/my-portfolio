@@ -333,7 +333,7 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
                 Commercial & Documentary Photography
               </h3>
               <p className="text-xs text-neutral-400 mt-1 max-w-md mx-auto">
-                Photography portfolio spanning events, branding sessions, and field media is being
+                Photography portfolio spanning events, branding sessions, and field media at JHUB Africa is being
                 published. Contact Kelvin for shoots and creative coverage.
               </p>
             </div>
@@ -356,6 +356,8 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
                     src={item.image}
                     alt={item.title}
                     referrerPolicy="no-referrer"
+                    loading="lazy"
+                    decoding="async"
                     className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-104"
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-80 group-hover:opacity-90 transition-opacity" />
