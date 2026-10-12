@@ -7,8 +7,20 @@ interface GraphicsGalleryProps {
   theme: 'dark' | 'light';
 }
 
+// Must match what the server accepts.
+const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'];
+const MAX_FILE_BYTES = 18 * 1024 * 1024;
+
 export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
-  const { isAdmin } = useAdmin();
+  const { isAdmin, adminFetch } = useAdmin();
+  const [pageError, setPageError] = useState('');
+
+  const errorText = (status: number): string => {
+    if (status === 401) return 'Your admin session expired. Unlock admin mode again.';
+    if (status === 413) return 'The image is too large for the server.';
+    if (status === 429) return 'Too many requests. Please wait a few minutes.';
+    return 'The server could not complete the request. Please try again.';
+  };
   const [items, setItems] = useState<GraphicItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -50,6 +62,16 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    if (!ALLOWED_TYPES.includes(file.type)) {
+      setUploadError('Please choose a PNG, JPEG, WEBP, GIF or AVIF image.');
+      return;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      setUploadError('That image is larger than 18 MB. Please choose a smaller file.');
+      return;
+    }
+    setUploadError('');
+
     setUploadedFileName(file.name);
     setUploadedFileType(file.type.split('/')[1]?.toUpperCase() || 'FILE');
     setUploadedFileSize((file.size / (1024 * 1024)).toFixed(2) + ' MB');
@@ -89,14 +111,19 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
     };
 
     try {
-      const res = await fetch('/api/graphics', {
+      // adminFetch sends the admin token, which the server requires for saving.
+      const res = await adminFetch('/api/graphics', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newItem)
       });
-      if (!res.ok) throw new Error('Server returned ' + res.status);
+      if (!res.ok) {
+        setUploadError(errorText(res.status));
+        return;
+      }
 
-      setItems((prev) => [newItem, ...prev]);
+      // The server uploaded the file to R2 and sends back its public URL.
+      const data = await res.json();
+      setItems((prev) => [{ ...newItem, id: data.id || newItem.id, image: data.image || newItem.image }, ...prev]);
       setUploadSuccess(true);
       setTimeout(() => {
         setUploadSuccess(false);
@@ -112,7 +139,7 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
       }, 700);
     } catch (err) {
       console.error('Could not save artwork:', err);
-      setUploadError('Could not save the artwork. Please try again.');
+      setUploadError('Network error. Check your connection and try again.');
     } finally {
       uploadingRef.current = false;
       setIsUploading(false);
@@ -121,13 +148,19 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
 
   const handleDeleteItem = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (!window.confirm('Delete this artwork? The file is also removed from R2. This cannot be undone.')) return;
+    setPageError('');
     try {
-      const res = await fetch(`/api/graphics/${encodeURIComponent(id)}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Server returned ' + res.status);
+      const res = await adminFetch(`/api/graphics/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!res.ok) {
+        setPageError(errorText(res.status));
+        return;
+      }
       setItems((prev) => prev.filter((item) => item.id !== id));
       if (lightboxItem?.id === id) setLightboxItem(null);
     } catch (err) {
       console.error('Could not delete artwork:', err);
+      setPageError('Network error. The artwork was not deleted.');
     }
   };
 
@@ -170,6 +203,12 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
             </div>
           )}
         </div>
+
+        {isAdmin && pageError && (
+          <div className="mb-6 p-3 rounded-xl border border-rose-500/30 bg-rose-500/10 text-xs text-rose-400">
+            {pageError}
+          </div>
+        )}
 
         {/* Gallery Content */}
         {isLoading ? (
@@ -230,7 +269,7 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
               <div
                 key={item.id}
                 onClick={() => setLightboxItem(item)}
-                className={`group relative rounded-2xl border overflow-hidden cursor-pointer transition-all duration-300 hover:translate-y-[-2px] ${
+                className={`group relative rounded-2xl border overflow-hidden cursor-pointer transition-all duration-300 hover:-translate-y-0.5 ${
                   theme === 'dark'
                     ? 'bg-[#12141F] border-[#232635] hover:border-[#383D55] shadow-lg'
                     : 'bg-white border-neutral-200 hover:border-neutral-300 shadow-sm hover:shadow-md'
@@ -242,9 +281,10 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
                     src={item.image}
                     alt={item.title}
                     referrerPolicy="no-referrer"
+                    loading="lazy"
                     className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-104"
                   />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-80 group-hover:opacity-90 transition-opacity" />
+                  <div className="absolute inset-0 bg-linear-to-t from-black/80 via-black/20 to-transparent opacity-80 group-hover:opacity-90 transition-opacity" />
 
                   {/* Delete button (Owner Admin only) */}
                   {isAdmin && (
@@ -336,7 +376,7 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
                     <input
                       ref={fileInputRef}
                       type="file"
-                      accept="image/*, .png, .jpg, .jpeg, .webp, .svg, .gif, .pdf"
+                      accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                       onChange={handleFileChange}
                       className="hidden"
                     />
@@ -357,10 +397,10 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
                       <div className="space-y-2">
                         <Upload className="w-8 h-8 mx-auto text-neutral-400" />
                         <div className="text-xs font-semibold">
-                          Click to select PNG, JPG, SVG, WEBP or any design image
+                          Click to select a PNG, JPG, WEBP, GIF or AVIF image
                         </div>
                         <div className="text-[11px] text-neutral-400">
-                          Supports all standard image formats and design files
+                          Up to 18 MB
                         </div>
                       </div>
                     )}
@@ -447,6 +487,8 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
                 <div className="flex items-center gap-2">
                   <a
                     href={lightboxItem.image}
+                    target="_blank"
+                    rel="noopener noreferrer"
                     download={lightboxItem.title.replace(/\s+/g, '_') + '.' + (lightboxItem.fileType?.toLowerCase() || 'jpg')}
                     className="p-2 rounded-lg border border-neutral-700 hover:bg-neutral-800 text-neutral-200"
                     title="Download original file"
