@@ -245,7 +245,7 @@ export const Hero: React.FC<HeroProps> = ({ theme, onExploreGraphics, onExploreW
                     </div>
                     <span className="font-bold text-base text-white">Kelvin Mwangi Wambui</span>
                     <span className="text-xs text-neutral-400 mt-1 max-w-xs leading-relaxed">
-                      {isAdmin ? 'Click here to upload your portrait photo' : 'Creative Director, Photographer & Full-Stack Developer'}
+                      {isAdmin ? 'Click here to upload your portrait photo' : 'Creative Director, Photographer & Full-Stack grep -n "adminFetch" src/components/Hero.tsxeveloper'}
                     </span>
                     {isAdmin && (
                       <span className="mt-3 px-3.5 py-1 text-xs font-semibold rounded-lg bg-[#E2B714] text-neutral-950">

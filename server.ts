@@ -7,6 +7,12 @@ import { Pool } from 'pg';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import {
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectCommand,
+  ListObjectsV2Command
+} from '@aws-sdk/client-s3';
 
 dotenv.config();
 
@@ -39,8 +45,29 @@ if (!ADMIN_TOKEN || ADMIN_TOKEN.length < 16) {
 }
 const adminTokenHash = crypto.createHash('sha256').update(ADMIN_TOKEN).digest();
 
+// Cloudflare R2 holds every image. Neon only stores text and the image URL.
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_BUCKET = process.env.R2_BUCKET;
+const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL?.replace(/\/+$/, '');
+// Folder in the bucket that "Sync from R2" imports from (photos you uploaded by hand).
+const R2_SYNC_PREFIX = process.env.R2_SYNC_PREFIX || 'my images/';
+
+if (!R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET || !R2_PUBLIC_URL) {
+  throw new Error(
+    'R2 is not configured. Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET and R2_PUBLIC_URL. Images are never stored in Neon.'
+  );
+}
+
+const r2 = new S3Client({
+  region: 'auto',
+  endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY }
+});
+
 // ---------------------------------------------------------------------------
-// Security headers (CSP is off so Vite dev and base64 images keep working)
+// Security headers (CSP is off so Vite dev and R2 images keep working)
 // ---------------------------------------------------------------------------
 app.use(
   helmet({
@@ -62,13 +89,12 @@ const MAX_IMAGE_CHARS = 25 * 1024 * 1024;
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 300,
-  skip: (req) => req.path.endsWith('/image'), // images have their own, higher limit below
+  skip: (req) => req.path.endsWith('/image'), // legacy image route has its own limit below
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests. Please try again later.' }
 });
 
-// A gallery page loads many images at once, and visitors on mobile networks often share an IP.
 const imageLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 1000,
@@ -120,6 +146,7 @@ app.get('/api/admin/check', adminFailLimiter, requireAdmin, (_req, res) => {
 // ---------------------------------------------------------------------------
 const ID_RE = /^[A-Za-z0-9_-]{1,50}$/;
 const IMAGE_PREFIX_RE = /^data:image\/(png|jpe?g|webp|gif|avif);base64,/;
+const STORED_IMAGE_HEADER_RE = /^data:(image\/(?:png|jpeg|webp|gif|avif));base64$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** Returns trimmed string ('' if empty/missing), or null if invalid. */
@@ -160,40 +187,80 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+}
+
 function serverError(res: Response, err: unknown) {
   console.error(err);
   return res.status(500).json({ error: 'Internal server error' });
 }
 
-// Serves an image stored as a base64 data URL as a real image file the browser can cache.
-const STORED_IMAGE_HEADER_RE = /^data:(image\/(?:png|jpeg|webp|gif|avif));base64$/;
+// ---------------------------------------------------------------------------
+// Cloudflare R2 image storage
+// ---------------------------------------------------------------------------
+const IMAGE_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/avif': 'avif'
+};
 
-async function sendStoredImage(
-  res: Response,
-  table: 'portfolio_photos' | 'portfolio_graphics',
-  id: string
-) {
-  if (!ID_RE.test(id)) return res.status(400).json({ error: 'Invalid id' });
+/** Public URL for an object key. Each path segment is encoded, so folders with spaces work. */
+function r2Url(key: string): string {
+  return `${R2_PUBLIC_URL}/${key.split('/').map(encodeURIComponent).join('/')}`;
+}
 
-  const { rows } = await pool.query(`SELECT image_data FROM ${table} WHERE id = $1`, [id]);
-  const data: string | undefined = rows[0]?.image_data;
-  if (!data) return res.status(404).json({ error: 'Not found' });
+/** Object key for one of our R2 URLs, or null if the URL is not in this bucket. */
+function r2KeyFromUrl(url: string): string | null {
+  if (!url.startsWith(`${R2_PUBLIC_URL}/`)) return null;
+  try {
+    return url
+      .slice(R2_PUBLIC_URL!.length + 1)
+      .split('/')
+      .map(decodeURIComponent)
+      .join('/');
+  } catch {
+    return null;
+  }
+}
 
-  const comma = data.indexOf(',');
-  const match = comma > 0 ? STORED_IMAGE_HEADER_RE.exec(data.slice(0, comma)) : null;
-  if (!match) return res.status(415).json({ error: 'Unsupported image' });
+/** Uploads a base64 data URL to R2 and returns its public URL. */
+async function saveImage(dataUrl: string, folder: string, id: string): Promise<string> {
+  const comma = dataUrl.indexOf(',');
+  const match = comma > 0 ? STORED_IMAGE_HEADER_RE.exec(dataUrl.slice(0, comma)) : null;
+  if (!match) throw new Error('Unsupported image');
 
-  res.set({
-    'Content-Type': match[1],
-    // An image never changes once uploaded (edits only change text), so it can be cached for a year.
-    'Cache-Control': 'public, max-age=31536000, immutable',
-    'X-Content-Type-Options': 'nosniff'
-  });
-  return res.send(Buffer.from(data.slice(comma + 1), 'base64'));
+  const key = `${folder}/${id}-${Date.now()}.${IMAGE_EXT[match[1]]}`;
+  await r2.send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET!,
+      Key: key,
+      Body: Buffer.from(dataUrl.slice(comma + 1), 'base64'),
+      ContentType: match[1],
+      // An image never changes once uploaded (edits only change text), so it can be cached for a year.
+      CacheControl: 'public, max-age=31536000, immutable'
+    })
+  );
+  return r2Url(key);
+}
+
+/** Deletes the image from R2 when the stored value is one of our R2 URLs. Never throws. */
+async function removeImage(stored: string | undefined | null) {
+  if (!stored) return;
+  const key = r2KeyFromUrl(stored);
+  if (!key) return;
+  try {
+    await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET!, Key: key }));
+  } catch (err) {
+    console.error('Could not delete image from R2:', err);
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Neon PostgreSQL connection
+// Neon PostgreSQL connection (text and image URLs only)
 // ---------------------------------------------------------------------------
 // Strip channel_binding if present for maximum Node.js pg SCRAM compatibility
 const neonConnectionString = rawConnectionString
@@ -216,6 +283,8 @@ async function initDb() {
   try {
     const client = await pool.connect();
     try {
+      // image_data / avatar_url / image_url hold an R2 URL. The column names are unchanged
+      // so existing rows keep working.
       await client.query(`
         CREATE TABLE IF NOT EXISTS portfolio_profile (
           id VARCHAR(50) PRIMARY KEY,
@@ -269,6 +338,32 @@ async function initDb() {
 
 initDb();
 
+// Legacy only: rows saved before the move to R2 still hold a base64 image. This serves them
+// (or redirects to R2) so nothing breaks. Run migrate-to-r2.ts, then this can be deleted.
+async function sendStoredImage(
+  res: Response,
+  table: 'portfolio_photos' | 'portfolio_graphics',
+  id: string
+) {
+  if (!ID_RE.test(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  const { rows } = await pool.query(`SELECT image_data FROM ${table} WHERE id = $1`, [id]);
+  const data: string | undefined = rows[0]?.image_data;
+  if (!data) return res.status(404).json({ error: 'Not found' });
+  if (/^https?:\/\//.test(data)) return res.redirect(301, data);
+
+  const comma = data.indexOf(',');
+  const match = comma > 0 ? STORED_IMAGE_HEADER_RE.exec(data.slice(0, comma)) : null;
+  if (!match) return res.status(415).json({ error: 'Unsupported image' });
+
+  res.set({
+    'Content-Type': match[1],
+    'Cache-Control': 'public, max-age=31536000, immutable',
+    'X-Content-Type-Options': 'nosniff'
+  });
+  return res.send(Buffer.from(data.slice(comma + 1), 'base64'));
+}
+
 // ---------------------------------------------------------------------------
 // API ROUTES
 // Public: GET routes and POST /api/contact.  Admin only: all other writes.
@@ -293,13 +388,21 @@ app.post('/api/profile', adminFailLimiter, requireAdmin, uploadJson, async (req:
     if (!isImageData(avatarUrl) && !isHttpUrl(avatarUrl)) {
       return res.status(400).json({ error: 'avatarUrl must be a PNG/JPEG/WEBP/GIF/AVIF data URL or an http(s) URL' });
     }
+
+    const { rows: old } = await pool.query('SELECT avatar_url FROM portfolio_profile WHERE id = $1', [
+      'kelvin_avatar'
+    ]);
+    const stored = isImageData(avatarUrl) ? await saveImage(avatarUrl, 'profile', 'avatar') : avatarUrl;
+
     await pool.query(
       `INSERT INTO portfolio_profile (id, avatar_url, updated_at)
        VALUES ('kelvin_avatar', $1, NOW())
        ON CONFLICT (id) DO UPDATE SET avatar_url = $1, updated_at = NOW()`,
-      [avatarUrl]
+      [stored]
     );
-    res.json({ success: true, avatarUrl });
+    if (old[0]?.avatar_url && old[0].avatar_url !== stored) await removeImage(old[0].avatar_url);
+
+    res.json({ success: true, avatarUrl: stored });
   } catch (err) {
     return serverError(res, err);
   }
@@ -309,7 +412,8 @@ app.post('/api/profile', adminFailLimiter, requireAdmin, uploadJson, async (req:
 app.get('/api/graphics', async (_req: Request, res: Response) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, title, client, description, file_type, file_size, created_at
+      `SELECT id, title, client, description, file_type, file_size, created_at,
+              CASE WHEN image_data LIKE 'http%' THEN image_data END AS direct_url
        FROM portfolio_graphics ORDER BY created_at DESC`
     );
     const formatted = rows.map((r) => ({
@@ -317,7 +421,7 @@ app.get('/api/graphics', async (_req: Request, res: Response) => {
       title: r.title,
       client: r.client,
       description: r.description,
-      image: `/api/graphics/${r.id}/image`,
+      image: r.direct_url || `/api/graphics/${r.id}/image`,
       fileType: r.file_type,
       fileSize: r.file_size,
       dateAdded:
@@ -348,12 +452,13 @@ app.post('/api/graphics', adminFailLimiter, requireAdmin, uploadJson, async (req
     }
 
     const graphicId = pickId(b.id, 'graphic');
+    const image = await saveImage(b.image, 'graphics', graphicId);
     await pool.query(
       `INSERT INTO portfolio_graphics (id, title, client, description, image_data, file_type, file_size)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [graphicId, title, client, description, b.image, fileType || 'IMG', fileSize]
+      [graphicId, title, client, description, image, fileType || 'IMG', fileSize]
     );
-    res.json({ success: true, id: graphicId });
+    res.json({ success: true, id: graphicId, image });
   } catch (err) {
     return serverError(res, err);
   }
@@ -362,7 +467,10 @@ app.post('/api/graphics', adminFailLimiter, requireAdmin, uploadJson, async (req
 app.delete('/api/graphics/:id', adminFailLimiter, requireAdmin, async (req: Request, res: Response) => {
   try {
     if (!ID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid id' });
-    await pool.query('DELETE FROM portfolio_graphics WHERE id = $1', [req.params.id]);
+    const { rows } = await pool.query('DELETE FROM portfolio_graphics WHERE id = $1 RETURNING image_data', [
+      req.params.id
+    ]);
+    await removeImage(rows[0]?.image_data);
     res.json({ success: true });
   } catch (err) {
     return serverError(res, err);
@@ -372,9 +480,10 @@ app.delete('/api/graphics/:id', adminFailLimiter, requireAdmin, async (req: Requ
 // 3. Photography gallery
 app.get('/api/photos', async (_req: Request, res: Response) => {
   try {
-    // image_data is deliberately not selected: each image is fetched separately from /api/photos/:id/image
+    // Only the URL is read from image_data, never a base64 body.
     const { rows } = await pool.query(
-      `SELECT id, title, location, camera_info, description, file_type, file_size, created_at
+      `SELECT id, title, location, camera_info, description, file_type, file_size, created_at,
+              CASE WHEN image_data LIKE 'http%' THEN image_data END AS direct_url
        FROM portfolio_photos ORDER BY created_at DESC`
     );
     const formatted = rows.map((r) => ({
@@ -383,7 +492,7 @@ app.get('/api/photos', async (_req: Request, res: Response) => {
       location: r.location,
       cameraInfo: r.camera_info,
       description: r.description,
-      image: `/api/photos/${r.id}/image`,
+      image: r.direct_url || `/api/photos/${r.id}/image`,
       fileType: r.file_type,
       fileSize: r.file_size,
       dateAdded:
@@ -421,12 +530,55 @@ app.post('/api/photos', adminFailLimiter, requireAdmin, uploadJson, async (req: 
     }
 
     const photoId = pickId(b.id, 'photo');
+    const image = await saveImage(b.image, 'photos', photoId);
     await pool.query(
       `INSERT INTO portfolio_photos (id, title, location, camera_info, description, image_data, file_type, file_size)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [photoId, title, location, cameraInfo, description, b.image, fileType || 'JPG', fileSize]
+      [photoId, title, location, cameraInfo, description, image, fileType || 'JPG', fileSize]
     );
-    res.json({ success: true, id: photoId });
+    res.json({ success: true, id: photoId, image });
+  } catch (err) {
+    return serverError(res, err);
+  }
+});
+
+// Imports photos you uploaded to R2 by hand (folder R2_SYNC_PREFIX) into the gallery.
+// Safe to run again: files already imported are skipped.
+app.post('/api/photos/sync-r2', adminFailLimiter, requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const allowed = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif']);
+    let added = 0;
+    let token: string | undefined;
+
+    do {
+      const page = await r2.send(
+        new ListObjectsV2Command({ Bucket: R2_BUCKET!, Prefix: R2_SYNC_PREFIX, ContinuationToken: token })
+      );
+
+      for (const obj of page.Contents ?? []) {
+        const key = obj.Key;
+        if (!key || key.endsWith('/')) continue;
+
+        const fileName = key.split('/').pop() || key;
+        const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : '';
+        if (!allowed.has(ext)) continue;
+
+        const id = 'r2-' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 16);
+        const title = fileName.replace(/\.[^/.]+$/, '').replace(/[-_]+/g, ' ').trim() || 'Photograph';
+
+        const result = await pool.query(
+          `INSERT INTO portfolio_photos (id, title, location, camera_info, description, image_data, file_type, file_size)
+           VALUES ($1, $2, 'Kenya', '', '', $3, $4, $5)
+           ON CONFLICT (id) DO NOTHING`,
+          [id, title, r2Url(key), ext === 'jpeg' ? 'JPEG' : ext.toUpperCase(), formatBytes(obj.Size ?? 0)]
+        );
+        added += result.rowCount ?? 0;
+      }
+
+      token = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (token);
+
+    res.json({ success: true, added });
   } catch (err) {
     return serverError(res, err);
   }
@@ -435,7 +587,10 @@ app.post('/api/photos', adminFailLimiter, requireAdmin, uploadJson, async (req: 
 app.delete('/api/photos/:id', adminFailLimiter, requireAdmin, async (req: Request, res: Response) => {
   try {
     if (!ID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid id' });
-    await pool.query('DELETE FROM portfolio_photos WHERE id = $1', [req.params.id]);
+    const { rows } = await pool.query('DELETE FROM portfolio_photos WHERE id = $1 RETURNING image_data', [
+      req.params.id
+    ]);
+    await removeImage(rows[0]?.image_data);
     res.json({ success: true });
   } catch (err) {
     return serverError(res, err);
@@ -469,12 +624,14 @@ app.post('/api/websites', adminFailLimiter, requireAdmin, uploadJson, async (req
       return res.status(400).json({ error: 'url must be a valid http(s) URL' });
     }
 
+    const webId = pickId(b.id, 'web');
+
     let imageUrl = '';
     if (b.imageUrl !== undefined && b.imageUrl !== null && b.imageUrl !== '') {
       if (!isHttpUrl(b.imageUrl) && !isImageData(b.imageUrl)) {
         return res.status(400).json({ error: 'imageUrl must be an http(s) URL or an image data URL' });
       }
-      imageUrl = b.imageUrl;
+      imageUrl = isImageData(b.imageUrl) ? await saveImage(b.imageUrl, 'websites', webId) : b.imageUrl;
     }
 
     let technologies: string[] = [];
@@ -489,13 +646,12 @@ app.post('/api/websites', adminFailLimiter, requireAdmin, uploadJson, async (req
       technologies = b.technologies.map((t: string) => t.trim());
     }
 
-    const webId = pickId(b.id, 'web');
     await pool.query(
       `INSERT INTO portfolio_websites (id, title, url, description, technologies, image_url, role, year)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [webId, title, b.url, description, technologies, imageUrl, role, year]
     );
-    res.json({ success: true, id: webId });
+    res.json({ success: true, id: webId, imageUrl });
   } catch (err) {
     return serverError(res, err);
   }
@@ -504,7 +660,10 @@ app.post('/api/websites', adminFailLimiter, requireAdmin, uploadJson, async (req
 app.delete('/api/websites/:id', adminFailLimiter, requireAdmin, async (req: Request, res: Response) => {
   try {
     if (!ID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid id' });
-    await pool.query('DELETE FROM portfolio_websites WHERE id = $1', [req.params.id]);
+    const { rows } = await pool.query('DELETE FROM portfolio_websites WHERE id = $1 RETURNING image_url', [
+      req.params.id
+    ]);
+    await removeImage(rows[0]?.image_url);
     res.json({ success: true });
   } catch (err) {
     return serverError(res, err);
@@ -594,7 +753,7 @@ app.post('/api/contact', contactLimiter, smallJson, async (req: Request, res: Re
 });
 
 // ---------------------------------------------------------------------------
-// IMAGE ROUTES (public): one image per request, cached by the browser.
+// LEGACY IMAGE ROUTES (public): only used by rows that still hold a base64 image.
 // ---------------------------------------------------------------------------
 app.get('/api/photos/:id/image', imageLimiter, async (req: Request, res: Response) => {
   try {
@@ -785,7 +944,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Portfolio server with Neon Database running on http://0.0.0.0:${PORT}`);
+    console.log(`Portfolio server running on http://0.0.0.0:${PORT} (images on Cloudflare R2, data on Neon)`);
   });
 }
 

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { PhotoItem } from '../types/portfolio';
-import { Camera, Upload, Plus, X, Download, Trash2, Eye, MapPin, Database, Check, Pencil } from 'lucide-react';
+import { Camera, Upload, Plus, X, Download, Trash2, Eye, MapPin, Database, Check, Pencil, RefreshCw } from 'lucide-react';
 import { useAdmin } from '../context/AdminContext';
 
 interface PhotographySectionProps {
@@ -54,6 +54,8 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [pageError, setPageError] = useState('');
+  const [pageNotice, setPageNotice] = useState('');
+  const [syncing, setSyncing] = useState(false);
 
   // Upload form state
   const [photoTitle, setPhotoTitle] = useState('');
@@ -89,27 +91,52 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
     return 'The server could not complete the request. Please try again.';
   };
 
-  // Load photos from the database. The database is the source of truth, so photos are no longer
-  // cached in localStorage (large images filled the browser quota and caused errors).
+  // Photo details come from the database; the image files themselves are served by Cloudflare R2.
+  const loadPhotos = async () => {
+    try {
+      const res = await fetch('/api/photos');
+      if (!res.ok) throw new Error('Failed to fetch photos');
+      const data: PhotoItem[] = await res.json();
+      if (Array.isArray(data)) setPhotos(data);
+    } catch (err) {
+      console.warn('Could not load photos:', err);
+    }
+  };
+
   useEffect(() => {
     try {
       localStorage.removeItem('kw_photography_uploads');
     } catch {
       /* ignore */
     }
-
-    fetch('/api/photos')
-      .then((res) => {
-        if (res.ok) return res.json();
-        throw new Error('Failed to fetch photos');
-      })
-      .then((data: PhotoItem[]) => {
-        if (Array.isArray(data)) setPhotos(data);
-      })
-      .catch((err) => {
-        console.warn('Could not load photos:', err);
-      });
+    loadPhotos();
   }, []);
+
+  // Imports photos that were uploaded straight into the R2 bucket (admin only).
+  const handleSyncR2 = async () => {
+    setPageError('');
+    setPageNotice('');
+    setSyncing(true);
+    try {
+      const res = await adminFetch('/api/photos/sync-r2', { method: 'POST' });
+      if (!res.ok) {
+        setPageError(errorText(res.status));
+        return;
+      }
+      const data = await res.json();
+      await loadPhotos();
+      setPageNotice(
+        data.added > 0
+          ? `Imported ${data.added} photo${data.added === 1 ? '' : 's'} from R2.`
+          : 'Everything in R2 is already in the gallery.'
+      );
+    } catch (err) {
+      console.error(err);
+      setPageError('Network error. Could not sync with R2.');
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -180,6 +207,7 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
         return;
       }
 
+      // The server uploaded the file to R2 and sends back its public URL.
       const data = await res.json();
       const newPhoto: PhotoItem = {
         id: data.id,
@@ -187,7 +215,7 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
         location: photoLocation.trim(),
         cameraInfo: photoCamera.trim(),
         description: photoDescription.trim(),
-        image: previewDataUrl,
+        image: data.image,
         fileType: uploadedFileType || 'JPG',
         fileSize: uploadedFileSize || '',
         dateAdded: new Date().toISOString().split('T')[0]
@@ -215,8 +243,9 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
 
   const handleDeletePhoto = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!window.confirm('Delete this photograph? This cannot be undone.')) return;
+    if (!window.confirm('Delete this photograph? The file is also removed from R2. This cannot be undone.')) return;
     setPageError('');
+    setPageNotice('');
 
     try {
       const res = await adminFetch(`/api/photos/${id}`, { method: 'DELETE' });
@@ -310,9 +339,22 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
             ></p>
           </div>
 
-          {/* Action: Upload Photo Button (Owner Admin Only) */}
+          {/* Actions: Sync + Upload (Owner Admin Only) */}
           {isAdmin && (
             <div className="flex items-center gap-3">
+              <button
+                onClick={handleSyncR2}
+                disabled={syncing}
+                title="Import photos you uploaded straight into the R2 bucket"
+                className={`px-5 py-2.5 rounded-xl text-xs font-semibold border transition-colors flex items-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                  theme === 'dark'
+                    ? 'border-[#252839] text-neutral-200 hover:bg-[#12141F]'
+                    : 'border-neutral-300 text-neutral-700 hover:bg-neutral-100'
+                }`}
+              >
+                <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
+                <span>{syncing ? 'Syncing...' : 'Sync from R2'}</span>
+              </button>
               <button
                 onClick={() => {
                   setUploadError('');
@@ -330,6 +372,11 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
         {isAdmin && pageError && (
           <div className="mb-6 p-3 rounded-xl border border-rose-500/30 bg-rose-500/10 text-xs text-rose-400">
             {pageError}
+          </div>
+        )}
+        {isAdmin && pageNotice && (
+          <div className="mb-6 p-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-400">
+            {pageNotice}
           </div>
         )}
 
@@ -355,7 +402,8 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
                 Your Photography Gallery is Ready
               </h3>
               <p className="text-xs sm:text-sm text-neutral-400 mt-2 max-w-md mx-auto leading-relaxed">
-                Upload photos you have taken over the years. All photos are stored in your Neon PostgreSQL database.
+                Upload photos you have taken over the years. Photo files are stored in Cloudflare R2, and the
+                details are saved in your database.
               </p>
               <button
                 onClick={(e) => {
@@ -404,6 +452,7 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
                     src={item.image}
                     alt={item.title}
                     referrerPolicy="no-referrer"
+                    loading="lazy"
                     decoding="async"
                     className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-104"
                   />
@@ -736,8 +785,12 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
                         <span className="text-[#E2B714]">{lightboxPhoto.cameraInfo}</span>
                       </>
                     )}
-                    <span>·</span>
-                    <span>{lightboxPhoto.fileSize}</span>
+                    {lightboxPhoto.fileSize && (
+                      <>
+                        <span>·</span>
+                        <span>{lightboxPhoto.fileSize}</span>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -751,11 +804,14 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
                       <Pencil className="w-4 h-4" />
                     </button>
                   )}
+                  {/* Photos live on another domain (R2), so the browser opens them in a new tab instead of downloading. */}
                   <a
                     href={lightboxPhoto.image}
+                    target="_blank"
+                    rel="noopener noreferrer"
                     download={lightboxPhoto.title.replace(/\s+/g, '_') + '.jpg'}
                     className="p-2 rounded-lg border border-neutral-700 hover:bg-neutral-800 text-neutral-200"
-                    title="Download high-res photograph"
+                    title="Open full-size photograph"
                   >
                     <Download className="w-4 h-4" />
                   </a>
