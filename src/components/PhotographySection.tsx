@@ -118,18 +118,26 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
     setPageNotice('');
     setSyncing(true);
     try {
-      const res = await adminFetch('/api/photos/sync-r2', { method: 'POST' });
+      const res = await adminFetch('/api/sync-r2', { method: 'POST' });
       if (!res.ok) {
         setPageError(errorText(res.status));
         return;
       }
       const data = await res.json();
       await loadPhotos();
-      setPageNotice(
-        data.added > 0
-          ? `Imported ${data.added} photo${data.added === 1 ? '' : 's'} from R2.`
-          : 'Everything in R2 is already in the gallery.'
-      );
+      const found = data.photos.found + data.graphics.found + data.profile.found;
+      const added = data.photos.added + data.graphics.added + data.profile.added;
+      if (found === 0) {
+        setPageNotice('No images found in R2. Check the folder names (my-images/, posters/, profile/).');
+      } else if (added === 0) {
+        setPageNotice('Everything in R2 is already on the site.');
+      } else {
+        setPageNotice(
+          `Imported ${data.photos.added} photo(s), ${data.graphics.added} poster(s)` +
+            (data.profile.added ? ' and the profile picture' : '') +
+            '. Refresh the page to see posters and the profile picture.'
+        );
+      }
     } catch (err) {
       console.error(err);
       setPageError('Network error. Could not sync with R2.');

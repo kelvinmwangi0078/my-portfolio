@@ -51,8 +51,10 @@ const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
 const R2_BUCKET = process.env.R2_BUCKET;
 const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL?.replace(/\/+$/, '');
-// Folder in the bucket that "Sync from R2" imports from (photos you uploaded by hand).
-const R2_SYNC_PREFIX = process.env.R2_SYNC_PREFIX || 'my images/';
+// Folders in the bucket that "Sync from R2" imports from (files you uploaded by hand).
+const R2_PHOTOS_PREFIX = process.env.R2_PHOTOS_PREFIX ?? 'my-images/';
+const R2_GRAPHICS_PREFIX = process.env.R2_GRAPHICS_PREFIX ?? 'posters/';
+const R2_PROFILE_PREFIX = process.env.R2_PROFILE_PREFIX ?? 'profile/';
 
 if (!R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET || !R2_PUBLIC_URL) {
   throw new Error(
@@ -542,43 +544,83 @@ app.post('/api/photos', adminFailLimiter, requireAdmin, uploadJson, async (req: 
   }
 });
 
-// Imports photos you uploaded to R2 by hand (folder R2_SYNC_PREFIX) into the gallery.
-// Safe to run again: files already imported are skipped.
-app.post('/api/photos/sync-r2', adminFailLimiter, requireAdmin, async (_req: Request, res: Response) => {
+// Imports files you uploaded to R2 by hand: my-images/ -> photos, posters/ -> graphics,
+// profile/ -> profile picture (only if none is set yet). Safe to run again: anything already imported is skipped.
+const SYNC_EXT = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif']);
+
+type R2Image = { key: string; size: number; modified: number; fileName: string; ext: string };
+
+async function listR2Images(prefix: string): Promise<R2Image[]> {
+  const out: R2Image[] = [];
+  let token: string | undefined;
+  do {
+    const page = await r2.send(
+      new ListObjectsV2Command({ Bucket: R2_BUCKET!, Prefix: prefix, ContinuationToken: token })
+    );
+    for (const obj of page.Contents ?? []) {
+      const key = obj.Key;
+      if (!key || key.endsWith('/')) continue;
+      const fileName = key.split('/').pop() || key;
+      const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : '';
+      if (!SYNC_EXT.has(ext)) continue;
+      out.push({ key, size: obj.Size ?? 0, modified: obj.LastModified?.getTime() ?? 0, fileName, ext });
+    }
+    token = page.IsTruncated ? page.NextContinuationToken : undefined;
+  } while (token);
+  return out;
+}
+
+const r2Id = (key: string) => 'r2-' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 16);
+const r2Title = (fileName: string, fallback: string) =>
+  fileName.replace(/\.[^/.]+$/, '').replace(/[-_]+/g, ' ').trim() || fallback;
+const r2Type = (ext: string) => (ext === 'jpeg' ? 'JPEG' : ext.toUpperCase());
+
+app.post('/api/sync-r2', adminFailLimiter, requireAdmin, async (_req: Request, res: Response) => {
   try {
-    const allowed = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif']);
-    let added = 0;
-    let token: string | undefined;
+    const result = {
+      photos: { found: 0, added: 0 },
+      graphics: { found: 0, added: 0 },
+      profile: { found: 0, added: 0 }
+    };
 
-    do {
-      const page = await r2.send(
-        new ListObjectsV2Command({ Bucket: R2_BUCKET!, Prefix: R2_SYNC_PREFIX, ContinuationToken: token })
+    // Photos
+    for (const f of await listR2Images(R2_PHOTOS_PREFIX)) {
+      result.photos.found++;
+      const r = await pool.query(
+        `INSERT INTO portfolio_photos (id, title, location, camera_info, description, image_data, file_type, file_size)
+         SELECT $1::varchar, $2::text, 'Kenya', '', '', $3::text, $4::varchar, $5::varchar
+         WHERE NOT EXISTS (SELECT 1 FROM portfolio_photos WHERE id = $1::varchar OR image_data = $3::text)`,
+        [r2Id(f.key), r2Title(f.fileName, 'Photograph'), r2Url(f.key), r2Type(f.ext), formatBytes(f.size)]
       );
+      result.photos.added += r.rowCount ?? 0;
+    }
 
-      for (const obj of page.Contents ?? []) {
-        const key = obj.Key;
-        if (!key || key.endsWith('/')) continue;
+    // Graphics / posters
+    for (const f of await listR2Images(R2_GRAPHICS_PREFIX)) {
+      result.graphics.found++;
+      const r = await pool.query(
+        `INSERT INTO portfolio_graphics (id, title, client, description, image_data, file_type, file_size)
+         SELECT $1::varchar, $2::text, '', '', $3::text, $4::varchar, $5::varchar
+         WHERE NOT EXISTS (SELECT 1 FROM portfolio_graphics WHERE id = $1::varchar OR image_data = $3::text)`,
+        [r2Id(f.key), r2Title(f.fileName, 'Artwork'), r2Url(f.key), r2Type(f.ext), formatBytes(f.size)]
+      );
+      result.graphics.added += r.rowCount ?? 0;
+    }
 
-        const fileName = key.split('/').pop() || key;
-        const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : '';
-        if (!allowed.has(ext)) continue;
+    // Profile picture: the newest file in the folder, used only when no picture is set yet.
+    const avatars = (await listR2Images(R2_PROFILE_PREFIX)).sort((a, b) => b.modified - a.modified);
+    result.profile.found = avatars.length;
+    if (avatars.length > 0) {
+      const r = await pool.query(
+        `INSERT INTO portfolio_profile (id, avatar_url, updated_at)
+         VALUES ('kelvin_avatar', $1, NOW())
+         ON CONFLICT (id) DO NOTHING`,
+        [r2Url(avatars[0].key)]
+      );
+      result.profile.added = r.rowCount ?? 0;
+    }
 
-        const id = 'r2-' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 16);
-        const title = fileName.replace(/\.[^/.]+$/, '').replace(/[-_]+/g, ' ').trim() || 'Photograph';
-
-        const result = await pool.query(
-          `INSERT INTO portfolio_photos (id, title, location, camera_info, description, image_data, file_type, file_size)
-           VALUES ($1, $2, 'Kenya', '', '', $3, $4, $5)
-           ON CONFLICT (id) DO NOTHING`,
-          [id, title, r2Url(key), ext === 'jpeg' ? 'JPEG' : ext.toUpperCase(), formatBytes(obj.Size ?? 0)]
-        );
-        added += result.rowCount ?? 0;
-      }
-
-      token = page.IsTruncated ? page.NextContinuationToken : undefined;
-    } while (token);
-
-    res.json({ success: true, added });
+    res.json({ success: true, ...result });
   } catch (err) {
     return serverError(res, err);
   }
