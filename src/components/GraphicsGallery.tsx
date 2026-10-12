@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { GraphicItem } from '../types/portfolio';
-import { Upload, Plus, X, Image as ImageIcon, Download, Trash2, Eye, Check } from 'lucide-react';
+import { Upload, Plus, X, Image as ImageIcon, Download, Trash2, Eye, Check, Pencil } from 'lucide-react';
 import { useAdmin } from '../context/AdminContext';
 
 interface GraphicsGalleryProps {
@@ -14,6 +14,18 @@ const MAX_FILE_BYTES = 18 * 1024 * 1024;
 export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
   const { isAdmin, adminFetch } = useAdmin();
   const [pageError, setPageError] = useState('');
+
+  // Edit form state
+  const [editingItem, setEditingItem] = useState<GraphicItem | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editClient, setEditClient] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState('');
+
+  const inputClass = `w-full py-2 px-3 rounded-lg border text-xs focus:outline-none focus:border-[#E2B714] ${
+    theme === 'dark' ? 'bg-[#12141F] border-[#252839] text-white' : 'bg-neutral-50 border-neutral-300'
+  }`;
 
   const errorText = (status: number): string => {
     if (status === 401) return 'Your admin session expired. Unlock admin mode again.';
@@ -164,6 +176,50 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
     }
   };
 
+  const openEdit = (item: GraphicItem, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setEditTitle(item.title || '');
+    setEditClient(item.client || '');
+    setEditDescription(item.description || '');
+    setEditError('');
+    setEditingItem(item);
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingItem || !editTitle.trim()) return;
+
+    setEditSaving(true);
+    setEditError('');
+
+    const changes = {
+      title: editTitle.trim(),
+      client: editClient.trim(),
+      description: editDescription.trim()
+    };
+
+    try {
+      const res = await adminFetch(`/api/graphics/${encodeURIComponent(editingItem.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(changes)
+      });
+      if (!res.ok) {
+        setEditError(errorText(res.status));
+        return;
+      }
+
+      const id = editingItem.id;
+      setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...changes } : it)));
+      setLightboxItem((prev) => (prev && prev.id === id ? { ...prev, ...changes } : prev));
+      setEditingItem(null);
+    } catch (err) {
+      console.error('Could not edit artwork:', err);
+      setEditError('Network error. Your changes were not saved.');
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
   return (
     <section id="graphics" className="py-20 border-t transition-colors duration-200" style={{
       borderColor: theme === 'dark' ? '#1E2232' : '#E5E7EB'
@@ -288,7 +344,14 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
 
                   {/* Delete button (Owner Admin only) */}
                   {isAdmin && (
-                    <div className="absolute top-3 right-3">
+                    <div className="absolute top-3 right-3 flex items-center gap-2">
+                      <button
+                        onClick={(e) => openEdit(item, e)}
+                        title="Edit details"
+                        className="p-1.5 rounded-lg bg-black/60 text-[#E2B714] hover:bg-[#E2B714] hover:text-neutral-950 transition-colors"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
                       <button
                         onClick={(e) => handleDeleteItem(item.id, e)}
                         title="Delete artwork"
@@ -465,6 +528,91 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
           </div>
         )}
 
+        {/* Edit Details Modal */}
+        {editingItem && (
+          <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
+            <div className="fixed inset-0" onClick={() => setEditingItem(null)} />
+
+            <div className={`relative w-full max-w-lg rounded-2xl border shadow-2xl p-6 z-10 ${
+              theme === 'dark' ? 'bg-[#0E1018] border-[#252839] text-white' : 'bg-white border-neutral-200 text-neutral-900'
+            }`}>
+              <div className="flex items-center justify-between pb-4 border-b border-neutral-800/40 mb-5">
+                <div className="flex items-center gap-2">
+                  <Pencil className="w-4 h-4 text-[#E2B714]" />
+                  <h3 className="font-bold text-base">Edit Artwork Details</h3>
+                </div>
+                <button
+                  onClick={() => setEditingItem(null)}
+                  className="p-1 rounded-lg hover:bg-neutral-800/40 text-neutral-400 hover:text-white"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveEdit} className="space-y-4">
+                <img
+                  src={editingItem.image}
+                  alt={editingItem.title}
+                  className="max-h-32 mx-auto rounded-lg object-contain shadow-sm"
+                />
+
+                <div className="space-y-1">
+                  <label className="block text-xs font-semibold text-neutral-400">Artwork / Project Title</label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={200}
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    className={inputClass}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-xs font-semibold text-neutral-400">Client / Brand</label>
+                  <input
+                    type="text"
+                    maxLength={200}
+                    value={editClient}
+                    onChange={(e) => setEditClient(e.target.value)}
+                    className={inputClass}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-xs font-semibold text-neutral-400">Description</label>
+                  <textarea
+                    rows={3}
+                    maxLength={2000}
+                    value={editDescription}
+                    onChange={(e) => setEditDescription(e.target.value)}
+                    className={inputClass}
+                  />
+                </div>
+
+                {editError && <p className="text-xs text-rose-400">{editError}</p>}
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setEditingItem(null)}
+                    className="py-3 rounded-xl text-xs font-bold uppercase tracking-wider border border-neutral-700 text-neutral-300 hover:bg-neutral-800/40 transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={editSaving || !editTitle.trim()}
+                    className="py-3 rounded-xl text-xs font-bold uppercase tracking-wider bg-[#E2B714] text-neutral-950 hover:bg-[#F0C52B] transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-md cursor-pointer"
+                  >
+                    {editSaving ? 'Saving...' : 'Save Changes'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
         {/* Lightbox High-Resolution Modal */}
         {lightboxItem && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-in fade-in duration-200">
@@ -485,6 +633,15 @@ export const GraphicsGallery: React.FC<GraphicsGalleryProps> = ({ theme }) => {
                 </div>
 
                 <div className="flex items-center gap-2">
+                  {isAdmin && (
+                    <button
+                      onClick={() => openEdit(lightboxItem)}
+                      className="p-2 rounded-lg border border-neutral-700 hover:bg-neutral-800 text-[#E2B714]"
+                      title="Edit details"
+                    >
+                      <Pencil className="w-4 h-4" />
+                    </button>
+                  )}
                   <a
                     href={lightboxItem.image}
                     target="_blank"
