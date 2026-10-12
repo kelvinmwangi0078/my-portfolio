@@ -449,7 +449,7 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
               <div
                 key={item.id}
                 onClick={() => setLightboxPhoto(item)}
-                className={`group relative rounded-2xl border overflow-hidden cursor-pointer transition-all duration-300 hover:translate-y-[-2px] ${
+                className={`group relative rounded-2xl border overflow-hidden cursor-pointer transition-all duration-300 hover:-translate-y-0.5 ${
                   theme === 'dark'
                     ? 'bg-[#12141F] border-[#232635] hover:border-[#383D55] shadow-lg'
                     : 'bg-white border-neutral-200 hover:border-neutral-300 shadow-sm hover:shadow-md'
@@ -464,7 +464,7 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
                     decoding="async"
                     className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-104"
                   />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-80 group-hover:opacity-90 transition-opacity" />
+                  <div className="absolute inset-0 bg-linear-to-t from-black/80 via-black/20 to-transparent opacity-80 group-hover:opacity-90 transition-opacity" />
 
                   {/* Edit + Delete buttons (Owner Admin only) */}
                   {isAdmin && (
@@ -671,7 +671,7 @@ export const PhotographySection: React.FC<PhotographySectionProps> = ({ theme })
 
         {/* Edit Details Modal */}
         {editingPhoto && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
             <div className="fixed inset-0" onClick={() => setEditingPhoto(null)} />
 
             <div
